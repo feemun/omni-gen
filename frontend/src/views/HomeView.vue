@@ -74,7 +74,7 @@ const connect = async () => {
   }
 }
 
-const useLLM = ref(false)
+const useLLM = ref(true)
 
 const generate = async () => {
   if (selectedTables.value.length === 0) {
@@ -187,7 +187,7 @@ const viewTableDetails = async (tableName) => {
         </p>
       </div>
 
-      <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-bottom: 20px;">
+      <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-bottom: 20px; display: none;">
         <input type="checkbox" id="useLLM" v-model="useLLM">
         <label for="useLLM" style="margin:0; cursor: pointer;">Enable AI Generation (Using configured LLM)</label>
       </div>

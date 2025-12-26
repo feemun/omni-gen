@@ -282,7 +282,7 @@ onMounted(() => {
             <textarea v-model="editingTemplate.prompt" class="prompt-editor" placeholder="Enter instructions for LLM generation..."></textarea>
           </div>
 
-          <div class="form-group flex-1">
+          <div class="form-group flex-1" style="display:none;">
             <label>Template Content (Jinja2)</label>
             <textarea v-model="editingTemplate.content" class="code-editor" spellcheck="false"></textarea>
           </div>
@@ -503,7 +503,7 @@ onMounted(() => {
   padding: 10px;
   border: 1px solid #dee2e6;
   border-radius: 6px;
-  min-height: 60px;
+  min-height: 300px;
   resize: vertical;
 }
 

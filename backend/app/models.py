@@ -77,7 +77,7 @@ class Template(Base):
     name = Column(String, index=True)  # Template filename/path (e.g., "entity.java.jinja2")
     display_name = Column(String, default="")       # User friendly name
     prompt = Column(String, default="")             # LLM Prompt
-    content = Column(String, nullable=False)        # Template content
+    content = Column(String, nullable=True, default="")        # Template content
     
     root_path = Column(String, default="")          # Root directory
     relative_path = Column(String, default="")      # Relative path pattern (e.g. {{TableName}}.java)

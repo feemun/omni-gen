@@ -93,12 +93,14 @@ const activateConfig = async (config) => {
 
 // Watch provider change to set default base_url
 const onProviderChange = () => {
-  if (formData.value.provider === 'ollama') {
-    formData.value.base_url = 'http://localhost:11434/v1'
-  } else if (formData.value.provider === 'openai_compatible') {
-    formData.value.base_url = 'https://api.openai.com/v1'
+    if (formData.value.provider === 'ollama') {
+      formData.value.base_url = 'http://localhost:11434/v1'
+    } else if (formData.value.provider === 'openai_compatible') {
+      formData.value.base_url = 'https://api.openai.com/v1'
+    } else if (formData.value.provider === 'deepseek') {
+      formData.value.base_url = 'https://api.deepseek.com'
+    }
   }
-}
 
 onMounted(() => {
   fetchConfigs()

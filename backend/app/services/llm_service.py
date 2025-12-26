@@ -1,8 +1,8 @@
 import json
-import requests
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from app.models import LLMConfig
+from openai import OpenAI
 
 class LLMService:
     def __init__(self):
@@ -16,42 +16,49 @@ class LLMService:
         if not config:
             raise Exception("No active LLM configuration found. Please configure LLM in settings.")
 
-        # OpenAI Compatible API (Ollama supports this at /v1)
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.api_key or 'ollama'}"
-        }
-        
-        payload = {
-            "model": config.model_name,
-            "messages": [
-                {"role": "system", "content": "You are an expert Java/Spring Boot developer. Output only the code, no markdown code blocks, no explanations."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2,
-            "stream": False
-        }
-        
-        # If model is thinking (e.g. deepseek-r1, qwen-qwq), we might want to suppress it if possible, 
-        # but OpenAI API doesn't standardly support 'suppress_thinking'.
-        # However, for some Ollama models, we can try to hint via system prompt or just filter it out later.
-        # DeepSeek R1 typically outputs <think>...</think>. We should strip that.
+        # Prepare client
+        api_key = config.api_key
+        if not api_key:
+            if config.provider == "ollama":
+                api_key = "ollama"
+            else:
+                # Strictly require API Key for other providers (DeepSeek, OpenAI, etc)
+                raise Exception(f"API Key is required for provider {config.provider}. Please configure it in settings.") 
 
+        # Clean base_url
+        # OpenAI client expects "https://api.deepseek.com" or "http://localhost:11434/v1"
+        # It appends /chat/completions itself
+        base_url = config.base_url.strip().rstrip('/')
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url.replace("/chat/completions", "")
+        
+        print(f"DEBUG: Initializing OpenAI Client with base_url='{base_url}', model='{config.model_name}'")
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=600.0 # Set timeout to 10 minutes for long generations
+        )
 
         try:
-            url = f"{config.base_url.rstrip('/')}/chat/completions"
-            # Increase timeout to 300 seconds (5 minutes) for slower local models
-            response = requests.post(url, headers=headers, json=payload, timeout=300)
-            response.raise_for_status()
+            # DeepSeek / OpenAI Call
+            response = client.chat.completions.create(
+                model=config.model_name,
+                messages=[
+                    {"role": "system", "content": "You are an expert Java/Spring Boot developer. Output only the code, no markdown code blocks, no explanations."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                stream=False
+            )
             
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            content = response.choices[0].message.content
             
             # Strip <think> tags if present (DeepSeek R1 style)
             import re
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             
-            # Strip markdown code blocks if present (despite system prompt)
+            # Strip markdown code blocks if present
             if content.startswith("```"):
                 content = content.split("\n", 1)[1]
                 if content.endswith("```"):

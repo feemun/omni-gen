@@ -106,7 +106,7 @@ class TemplateGroupCreate(BaseModel):
 class TemplateCreate(BaseModel):
     group_id: int
     name: str
-    content: str
+    content: Optional[str] = ""
     root_path: str = ""
     relative_path: str = ""
     display_name: str = ""
