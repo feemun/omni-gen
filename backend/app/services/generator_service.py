@@ -1,7 +1,7 @@
 import json
 import re
 from jinja2 import Environment, DictLoader
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Generator
 from sqlalchemy.orm import Session
 from app.models import Template
 from app.services.llm_service import llm_service
@@ -179,5 +179,45 @@ class GeneratorService:
             return tmpl.render(context)
         except Exception as e:
             raise Exception(f"Error generating code from template {template.name}: {str(e)}")
+
+    def generate_code_stream(self, db: Session, template_id: int, context: Dict[str, Any], use_llm: bool = True) -> Generator[str, None, None]:
+        """Generates code stream based on a template and context."""
+        template = db.query(Template).filter(Template.id == template_id).first()
+        if not template:
+            yield ""
+            return
+        
+        # Branch 1: LLM Generation (Stream)
+        if use_llm:
+             # Check if prompt exists
+             if not template.prompt:
+                 yield "// Error: Template has no prompt configured for AI generation."
+                 return
+             
+             # Prepare Prompt
+             schema_text = format_schema_to_prompt(context)
+             llm_context = context.copy()
+             llm_context["schema_text"] = schema_text
+             
+             # Render Prompt Template
+             env = Environment(loader=DictLoader({"prompt": template.prompt}))
+             try:
+                 tmpl = env.get_template("prompt")
+                 rendered_prompt = tmpl.render(llm_context)
+             except Exception as e:
+                 yield f"// Error rendering prompt template: {str(e)}"
+                 return
+             
+             # Call LLM Stream
+             yield from llm_service.chat_completion_stream(db, rendered_prompt)
+             return
+
+        # Branch 2: Standard Jinja2 Generation (Non-stream, but we mock it)
+        # ... (Existing logic but yielded)
+        try:
+            code = self.generate_code(db, template_id, context, use_llm=False)
+            yield code
+        except Exception as e:
+            yield f"// Error: {str(e)}"
 
 generator_service = GeneratorService()

@@ -2,6 +2,8 @@
 import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
 import { FileCode, Plus, Trash2, Edit2, X, Save, Folder, FolderPlus, ArrowLeft, ChevronRight } from 'lucide-vue-next'
+import { MdEditor } from 'md-editor-v3'
+import 'md-editor-v3/lib/style.css'
 import { useAppStore } from '../stores/app'
 
 const store = useAppStore()
@@ -277,9 +279,9 @@ onMounted(() => {
              Final path = Root Path + Relative Path. Use &#123;&#123; TableName &#125;&#125; in Relative Path.
           </small>
 
-          <div class="form-group">
+          <div class="form-group flex-1">
             <label>LLM Prompt (System Instruction)</label>
-            <textarea v-model="editingTemplate.prompt" class="prompt-editor" placeholder="Enter instructions for LLM generation..."></textarea>
+            <MdEditor v-model="editingTemplate.prompt" language="en-US" style="height: 100%;" :preview="false" :subfield="false" />
           </div>
 
           <div class="form-group flex-1" style="display:none;">

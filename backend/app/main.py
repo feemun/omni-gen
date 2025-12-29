@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
@@ -7,6 +8,8 @@ from app.services.db_service import db_service
 from app.services.generator_service import generator_service
 from app.models import Base, DatabaseConfig, RedisConfig, ESConfig, Template, TemplateGroup, LLMConfig, engine, get_db, init_db
 import uvicorn
+import json
+import asyncio
 
 # Initialize DB
 init_db()
@@ -338,6 +341,99 @@ async def generate_code(request: GenerateRequest, db: Session = Depends(get_db))
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/generate/stream")
+async def generate_code_stream(request: GenerateRequest, db: Session = Depends(get_db)):
+    async def event_stream():
+        try:
+            # Get all templates in the group
+            group = db.query(TemplateGroup).filter(TemplateGroup.id == request.template_group_id).first()
+            if not group:
+                yield json.dumps({"type": "error", "message": "Template Group not found"}) + "\n"
+                return
+            
+            if not group.templates:
+                 yield json.dumps({"type": "error", "message": "No templates in this group"}) + "\n"
+                 return
+
+            total_files = len(request.selected_tables) * len(group.templates)
+            yield json.dumps({"type": "start", "total": total_files}) + "\n"
+
+            for table in request.selected_tables:
+                schema = db_service.get_table_schema(request.db_url, table)
+                
+                # Context setup (Same as normal generate)
+                context = schema.copy()
+                context['TableName'] = table
+                
+                # Jinja Env for path rendering
+                from jinja2 import Environment
+                path_env = Environment()
+                from app.services.generator_service import to_kebab_case, to_camel_case, to_pascal_case
+                path_env.filters['to_kebab_case'] = to_kebab_case
+                path_env.filters['to_camel_case'] = to_camel_case
+                path_env.filters['to_pascal_case'] = to_pascal_case
+
+                for tmpl in group.templates:
+                    # Resolve Path
+                    try:
+                        path_tmpl = path_env.from_string(tmpl.relative_path or "")
+                        rendered_relative_path = path_tmpl.render(context)
+                    except:
+                        rendered_relative_path = tmpl.relative_path
+                    
+                    root = tmpl.root_path or ""
+                    if root and not root.endswith("/"):
+                        root += "/"
+                    full_path = root + rendered_relative_path
+
+                    # Notify File Start
+                    yield json.dumps({
+                        "type": "file_start", 
+                        "file": rendered_relative_path,
+                        "full_path": full_path,
+                        "table": table,
+                        "template": tmpl.display_name or tmpl.name
+                    }) + "\n"
+
+                    # Generate Code Stream
+                    full_code_buffer = ""
+                    try:
+                        # We use a generator from generator_service
+                        # Note: We are inside an async function, but generator_service is synchronous generator.
+                        # Ideally we should run this in threadpool if it blocks, but LLM call inside is blocking.
+                        # For now, we iterate the sync generator.
+                        stream_gen = generator_service.generate_code_stream(db, tmpl.id, schema, request.use_llm)
+                        
+                        for chunk in stream_gen:
+                            if chunk:
+                                full_code_buffer += chunk
+                                yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
+                                # Small sleep to let event loop breathe if needed, or just let it flow
+                                await asyncio.sleep(0) 
+
+                    except Exception as e:
+                        yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+                        full_code_buffer = f"// Error generating code: {e}"
+
+                    # Write File (Side Effect)
+                    import os
+                    try:
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, "w", encoding="utf-8") as f:
+                            f.write(full_code_buffer)
+                    except Exception as e:
+                        yield json.dumps({"type": "error", "message": f"Write failed: {e}"}) + "\n"
+
+                    # Notify File End
+                    yield json.dumps({"type": "file_end"}) + "\n"
+            
+            yield json.dumps({"type": "done"}) + "\n"
+
+        except Exception as e:
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 # Data Source API (Database)
 @app.post("/api/datasources/database", response_model=DatabaseConfigResponse)

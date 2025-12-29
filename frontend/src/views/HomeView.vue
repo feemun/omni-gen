@@ -1,9 +1,11 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
 import axios from 'axios'
-import { Settings, Info, X } from 'lucide-vue-next'
+import { Settings, Info, X, Check } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
+import hljs from 'highlight.js'
+import 'highlight.js/styles/atom-one-dark.css'
 
 const store = useAppStore()
 const route = useRoute()
@@ -76,6 +78,37 @@ const connect = async () => {
 
 const useLLM = ref(true)
 
+// Streaming State
+const showStreamModal = ref(false)
+const streamProgress = ref(0)
+const streamTotal = ref(0)
+const streamCurrentFile = ref('')
+const streamCurrentTable = ref('')
+const streamCurrentContent = ref('')
+const streamLogs = ref([]) // History of completed files
+const selectedHistoryFile = ref(null)
+
+const selectHistoryFile = (log) => {
+  selectedHistoryFile.value = log
+}
+
+const getDisplayContent = () => {
+  if (streamCurrentFile.value && 
+      selectedHistoryFile.value?.file === streamCurrentFile.value && 
+      selectedHistoryFile.value?.table === streamCurrentTable.value) {
+    return streamCurrentContent.value
+  }
+  if (selectedHistoryFile.value) {
+    const key = `${selectedHistoryFile.value.table}:${selectedHistoryFile.value.file}`
+    return generatedContentMap.value.get(key) || ''
+  }
+  return ''
+}
+
+const getDisplayFilename = () => {
+  return selectedHistoryFile.value?.file || ''
+}
+
 const generate = async () => {
   if (selectedTables.value.length === 0) {
     error.value = "Please select at least one table"
@@ -86,18 +119,148 @@ const generate = async () => {
   error.value = ''
   results.value = []
   
+  // Reset Stream State
+  showStreamModal.value = true
+  streamProgress.value = 0
+  streamTotal.value = 0
+  streamCurrentFile.value = ''
+  streamCurrentTable.value = ''
+  streamCurrentContent.value = ''
+  streamLogs.value = []
+  selectedHistoryFile.value = null
+
   try {
-    const res = await api.post('/generate', {
-      db_url: dbUrl.value,
-      selected_tables: selectedTables.value,
-      template_group_id: selectedTemplateGroupId.value,
-      use_llm: useLLM.value
+    const response = await fetch('http://localhost:8000/api/generate/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        db_url: dbUrl.value,
+        selected_tables: selectedTables.value,
+        template_group_id: selectedTemplateGroupId.value,
+        use_llm: true
+      })
     })
-    results.value = res.data.results
+
+    if (!response.ok) {
+      throw new Error(response.statusText)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      
+      // Process all complete lines
+      buffer = lines.pop() // Keep the last incomplete line in buffer
+      
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const event = JSON.parse(line)
+          handleStreamEvent(event)
+        } catch (e) {
+          console.error('Error parsing JSON stream:', e)
+        }
+      }
+    }
+    
+    // Refresh results list
+    // results.value should be populated from logs or by re-fetching
+    // But since we have the content in logs? No, logs only have metadata.
+    // The stream doesn't persist to `results` variable in the same way the old API did.
+    // However, the backend DOES write files to disk.
+    // So we can reconstruct `results` from `streamLogs` if we had the content, but we don't store full content in logs.
+    
+    // Better approach: Since files are written to disk, maybe we can just let user know it's done.
+    // OR, we can accumulate content in a map and then show it.
+    
+    // Let's populate `results` from the accumulated data if possible.
+    // But wait, `streamLogs` only has file path.
+    // We need to store content in a map during stream.
+    
   } catch (err) {
-    error.value = err.response?.data?.detail || err.message
+    error.value = err.message
+    // Close modal on error
+    showStreamModal.value = false
   } finally {
     loading.value = false
+  }
+}
+
+// Map to store full content of generated files for display
+const generatedContentMap = ref(new Map())
+
+const handleStreamEvent = (event) => {
+  switch (event.type) {
+    case 'start':
+      streamTotal.value = event.total
+      generatedContentMap.value.clear()
+      break
+    case 'file_start':
+      streamCurrentFile.value = event.file
+      streamCurrentTable.value = event.table
+      streamCurrentContent.value = '' // Clear content for new file
+      selectedHistoryFile.value = { file: event.file, table: event.table }
+      break
+    case 'chunk':
+      streamCurrentContent.value += event.content
+      // Auto scroll to bottom of code block if needed
+      break
+    case 'file_end':
+      streamProgress.value++
+      // Store completed content
+      const key = `${streamCurrentTable.value}:${streamCurrentFile.value}`
+      generatedContentMap.value.set(key, streamCurrentContent.value)
+      
+      // Add to logs only if not already there (deduplication check)
+      const existingIndex = streamLogs.value.findIndex(log => log.file === streamCurrentFile.value && log.table === streamCurrentTable.value)
+      if (existingIndex === -1) {
+        streamLogs.value.unshift({
+          file: streamCurrentFile.value,
+          table: streamCurrentTable.value
+        })
+      }
+      
+      // Update main results view progressively
+      let tableResult = results.value.find(r => r.table === streamCurrentTable.value)
+      if (!tableResult) {
+        tableResult = { table: streamCurrentTable.value, files: [] }
+        results.value.push(tableResult)
+      }
+      
+      // Check if file already exists in results
+      const existingFileIndex = tableResult.files.findIndex(f => f.relative_path === streamCurrentFile.value)
+      const fileData = {
+        template_name: 'Generated File', // We might want to pass this in event
+        path: '', // Full path not critical for display
+        root_path: '',
+        relative_path: streamCurrentFile.value,
+        code: streamCurrentContent.value
+      }
+      
+      if (existingFileIndex !== -1) {
+        tableResult.files[existingFileIndex] = fileData
+      } else {
+        tableResult.files.push(fileData)
+      }
+
+      // Reset current file state to prevent ghosting
+      streamCurrentFile.value = ''
+      streamCurrentTable.value = ''
+      streamCurrentContent.value = ''
+      break
+    case 'done':
+      // Maybe show a success message or button
+      break
+    case 'error':
+      alert('Stream Error: ' + event.message)
+      break
   }
 }
 
@@ -118,6 +281,43 @@ const viewTableDetails = async (tableName) => {
     showTableModal.value = false
   } finally {
     loadingSchema.value = false
+  }
+}
+
+const highlightCode = (code, filename = '') => {
+  if (!code) return ''
+  
+  // Try to guess language from filename
+  let lang = ''
+  if (filename) {
+    const ext = filename.split('.').pop().toLowerCase()
+    const map = {
+      'java': 'java',
+      'py': 'python',
+      'js': 'javascript',
+      'ts': 'typescript',
+      'vue': 'xml', 
+      'html': 'xml',
+      'xml': 'xml',
+      'sql': 'sql',
+      'json': 'json',
+      'md': 'markdown',
+      'css': 'css',
+      'scss': 'scss',
+      'sh': 'bash',
+      'yml': 'yaml',
+      'yaml': 'yaml'
+    }
+    lang = map[ext]
+  }
+
+  try {
+    if (lang && hljs.getLanguage(lang)) {
+       return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value
+    }
+    return hljs.highlightAuto(code).value
+  } catch (e) {
+    return code
   }
 }
 </script>
@@ -209,7 +409,55 @@ const viewTableDetails = async (tableName) => {
                 <span class="path-relative">{{ file.relative_path }}</span>
               </div>
             </div>
-            <pre><code>{{ file.code }}</code></pre>
+            <pre><code class="hljs" v-html="highlightCode(file.code)"></code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stream Progress Modal -->
+    <div v-if="showStreamModal" class="modal-overlay" @click.self="showStreamModal = false">
+      <div class="modal stream-modal">
+        <div class="modal-header">
+          <div class="stream-header-info">
+            <h3>Generating Code...</h3>
+            <span class="progress-badge">{{ streamProgress }} / {{ streamTotal }}</span>
+          </div>
+          <button class="btn-icon" @click="showStreamModal = false"><X class="icon-sm" /></button>
+        </div>
+        
+        <div class="modal-body stream-body">
+          <!-- Left: History/List -->
+          <div class="stream-sidebar">
+            <h4>Generated Files</h4>
+            <div class="file-list">
+              <div v-if="streamCurrentFile" 
+                   class="file-item"
+                   :class="{ selected: selectedHistoryFile && selectedHistoryFile.file === streamCurrentFile }"
+                   @click="selectHistoryFile({ file: streamCurrentFile, table: streamCurrentTable })">
+                <div class="status-indicator loading"></div>
+                <span class="name">{{ streamCurrentFile }}</span>
+              </div>
+              <div v-for="log in streamLogs" :key="log.file" 
+                   class="file-item done"
+                   :class="{ selected: selectedHistoryFile && selectedHistoryFile.file === log.file && selectedHistoryFile.table === log.table }"
+                   @click="selectHistoryFile(log)">
+                <div class="status-indicator success">
+                  <Check class="icon-check" />
+                </div>
+                <span class="name">{{ log.file }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Live Code -->
+          <div class="stream-content">
+            <div class="stream-content-header">
+              <span v-if="streamCurrentFile"><strong>Generating:</strong> {{ streamCurrentFile }} ({{ streamCurrentTable }})</span>
+              <span v-else-if="selectedHistoryFile"><strong>Viewing:</strong> {{ selectedHistoryFile.file }} ({{ selectedHistoryFile.table }})</span>
+              <span v-else>Generation Complete</span>
+            </div>
+            <pre class="stream-code-block"><code class="hljs" style="background:transparent; padding:0;" v-html="highlightCode(getDisplayContent(), getDisplayFilename())"></code><span class="cursor" v-if="streamCurrentFile && selectedHistoryFile?.file === streamCurrentFile"></span></pre>
           </div>
         </div>
       </div>
@@ -459,6 +707,172 @@ select {
 .icon-xs {
   width: 14px;
   height: 14px;
+}
+
+.stream-modal {
+  width: 90vw;
+  height: 90vh;
+  max-width: 1200px;
+  display: flex;
+  flex-direction: column;
+}
+
+.stream-header-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.progress-badge {
+  background-color: #e7f5ff;
+  color: #1c7ed6;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.stream-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  padding: 0;
+}
+
+.stream-sidebar {
+  flex: 1;
+  border-right: 1px solid #e9ecef;
+  background-color: #f8f9fa;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px; /* Ensure it doesn't get too small */
+}
+
+.stream-sidebar h4 {
+  padding: 16px;
+  margin: 0;
+  border-bottom: 1px solid #e9ecef;
+  font-size: 1rem;
+  color: #495057;
+}
+
+.file-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+}
+
+.file-item.selected {
+  background-color: #e7f5ff;
+  border: 1px solid #74c0fc;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  font-weight: 600;
+  color: #1971c2;
+}
+
+.status-indicator {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 12px;
+  flex-shrink: 0;
+}
+
+.status-indicator.loading {
+  background-color: #40c057; /* Green for processing */
+  box-shadow: 0 0 0 0 rgba(64, 192, 87, 0.7);
+  animation: pulse-green-loading 1.5s infinite;
+}
+
+.status-indicator.success {
+  background-color: #2f9e44; /* Darker green for done */
+  color: white;
+}
+
+.icon-check {
+  width: 14px;
+  height: 14px;
+  stroke-width: 3;
+}
+
+@keyframes pulse-green-loading {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(64, 192, 87, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 8px rgba(64, 192, 87, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(64, 192, 87, 0);
+  }
+}
+
+@keyframes pulse-border {
+  0% { border-color: #dee2e6; }
+  50% { border-color: #74c0fc; }
+  100% { border-color: #dee2e6; }
+}
+
+.file-item.done {
+  color: #2f9e44;
+}
+
+.stream-content {
+  flex: 3;
+  display: flex;
+  flex-direction: column;
+  background-color: #1e1e1e;
+  color: #d4d4d4;
+  overflow: hidden;
+}
+
+.stream-content-header {
+  padding: 10px 20px;
+  background-color: #252526;
+  border-bottom: 1px solid #333;
+  color: #cccccc;
+  font-size: 0.9rem;
+}
+
+.stream-code-block {
+  flex: 1;
+  margin: 0;
+  padding: 20px;
+  overflow: auto;
+  font-family: 'Fira Code', monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background-color: #d4d4d4;
+  margin-left: 2px;
+  animation: blink 1s step-end infinite;
+  vertical-align: middle;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
 }
 
 /* Modal Styles */

@@ -1,5 +1,5 @@
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Generator
 from sqlalchemy.orm import Session
 from app.models import LLMConfig
 from openai import OpenAI
@@ -11,11 +11,7 @@ class LLMService:
     def get_active_config(self, db: Session) -> Optional[LLMConfig]:
         return db.query(LLMConfig).filter(LLMConfig.is_active == 1).first()
 
-    def chat_completion(self, db: Session, prompt: str) -> str:
-        config = self.get_active_config(db)
-        if not config:
-            raise Exception("No active LLM configuration found. Please configure LLM in settings.")
-
+    def _get_client(self, config: LLMConfig) -> OpenAI:
         # Prepare client
         api_key = config.api_key
         if not api_key:
@@ -26,19 +22,24 @@ class LLMService:
                 raise Exception(f"API Key is required for provider {config.provider}. Please configure it in settings.") 
 
         # Clean base_url
-        # OpenAI client expects "https://api.deepseek.com" or "http://localhost:11434/v1"
-        # It appends /chat/completions itself
         base_url = config.base_url.strip().rstrip('/')
         if base_url.endswith("/chat/completions"):
             base_url = base_url.replace("/chat/completions", "")
         
         print(f"DEBUG: Initializing OpenAI Client with base_url='{base_url}', model='{config.model_name}'")
 
-        client = OpenAI(
+        return OpenAI(
             api_key=api_key,
             base_url=base_url,
-            timeout=600.0 # Set timeout to 10 minutes for long generations
+            timeout=600.0
         )
+
+    def chat_completion(self, db: Session, prompt: str) -> str:
+        config = self.get_active_config(db)
+        if not config:
+            raise Exception("No active LLM configuration found. Please configure LLM in settings.")
+
+        client = self._get_client(config)
 
         try:
             # DeepSeek / OpenAI Call
@@ -68,5 +69,34 @@ class LLMService:
             
         except Exception as e:
             raise Exception(f"LLM Call Failed: {str(e)}")
+
+    def chat_completion_stream(self, db: Session, prompt: str) -> Generator[str, None, None]:
+        config = self.get_active_config(db)
+        if not config:
+            raise Exception("No active LLM configuration found.")
+
+        client = self._get_client(config)
+
+        try:
+            stream = client.chat.completions.create(
+                model=config.model_name,
+                messages=[
+                    {"role": "system", "content": "You are an expert Java/Spring Boot developer. Output only the code, no markdown code blocks, no explanations."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                stream=True
+            )
+            
+            # We need to handle <think> tags in stream, which is hard.
+            # For now, we yield everything, but maybe frontend can hide <think>?
+            # Or we try to buffer simple logic.
+            # Let's yield raw chunks for now.
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            raise Exception(f"LLM Stream Failed: {str(e)}")
 
 llm_service = LLMService()
